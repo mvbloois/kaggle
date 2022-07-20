@@ -1,0 +1,173 @@
+---
+title: "Titanic EDA"
+author: "Martijn van Bloois"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r pkg-load}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+#library(glmnet)
+library(xgboost) 
+```
+
+```{r data-load}
+train <- read_csv("./data/train.csv") %>% 
+  mutate(Survived = ifelse(Survived == 0, "no", "yes"),
+         Pclass = factor(Pclass),
+         Fare = log1p(Fare),
+         Embarked = ifelse(is.na(Embarked), mode(Embarked), Embarked),
+         Cabin = ifelse(is.na(Cabin), "no", "yes"),
+         FamilySize = SibSp + Parch
+         ) %>% 
+  group_by(Pclass) %>% 
+  mutate(Age = ifelse(is.na(Age), median(Age), Age)) %>% 
+  ungroup() %>% 
+  select(-PassengerId, -Name, -Ticket)
+
+test <- read_csv("./data/test.csv") %>% 
+  mutate(Pclass = factor(Pclass),
+         Fare = log1p(Fare),
+         Embarked = ifelse(is.na(Embarked), mode(Embarked), Embarked),
+         Cabin = ifelse(is.na(Cabin), "no", "yes"),
+         FamilySize = SibSp + Parch
+         ) %>% 
+  group_by(Pclass) %>% 
+  mutate(Age = ifelse(is.na(Age), median(Age), Age)) %>% 
+  ungroup() %>% 
+  select(-Name, -Ticket)
+```
+
+
+```{r}
+xgboost_model <- 
+  parsnip::boost_tree(
+    mode = "classification",
+    trees = 1000,
+    min_n = tune(),
+    tree_depth = tune(),
+    learn_rate = tune(),
+    loss_reduction = tune()
+  ) %>%
+    set_engine("xgboost")
+
+recipe <- recipe(formula = Survived ~ ., data = train) %>% 
+  step_range(all_numeric_predictors())
+  step_dummy(all_nominal_predictors())
+
+xgboost_params <- 
+  dials::parameters(
+    min_n(),
+    tree_depth(),
+    learn_rate(),
+    loss_reduction()
+  )
+
+xgboost_grid <- 
+  dials::grid_max_entropy(
+    xgboost_params, 
+    size = 60
+  )
+
+set.seed(123)
+data_split <- initial_split(train, 
+                            strata = Survived)
+data_train <- training(data_split)
+data_test  <- testing(data_split)
+
+set.seed(234)
+data_folds <- vfold_cv(data_train)
+
+set.seed(345)
+
+data_wf <- workflow() %>%
+  add_model(xgboost_model) %>%
+  add_recipe(recipe)
+
+data_res <- 
+  data_wf %>% 
+  tune_grid(
+    resamples = data_folds,
+    grid = xgboost_grid
+    )
+
+data_res
+```
+
+``` {r}
+data_res %>% 
+  collect_metrics()
+```
+
+``` {r}
+data_res %>% 
+  collect_metrics() %>%
+  mutate(tree_depth = factor(tree_depth)) %>%
+  ggplot(aes(cost_complexity, mean, color = tree_depth)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) +
+  scale_x_log10(labels = scales::label_number()) +
+  scale_color_viridis_d(option = "plasma", begin = .9, end = 0)
+```
+
+``` {r}
+data_res %>%
+  show_best("accuracy")
+```
+
+``` {r}
+best_tree <- data_res %>%
+  select_best("accuracy")
+```
+
+``` {r}
+final_wf <- 
+  data_wf %>% 
+  finalize_workflow(best_tree)
+
+final_fit <- 
+  final_wf %>%
+  last_fit(data_split) 
+
+final_fit %>%
+  collect_metrics()
+```
+
+``` {r}
+final_fit %>%
+  collect_predictions() %>% 
+  roc_curve(Survived, .pred_class) %>% 
+  autoplot()
+```
+
+``` {r}
+final_tree <- extract_workflow(final_fit)
+final_tree
+
+final_tree %>%
+  extract_fit_engine() %>%
+  rpart.plot(roundint = FALSE)
+
+library(vip)
+
+final_tree %>% 
+  extract_fit_parsnip() %>% 
+  vip()
+
+bind_cols(
+  select(test, PassengerId),
+  predict(final_tree, test)
+) %>% 
+  rename(Survived = .pred_class) %>% 
+  mutate(Survived = ifelse(Survived == "no", 0, 1)) %>% 
+  write_csv("./data/titanic_xgboost_20220719.csv")
+
+```
+

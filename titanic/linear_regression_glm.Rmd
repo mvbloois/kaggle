@@ -1,0 +1,43 @@
+---
+title: "Titanic EDA"
+author: "Martijn van Bloois"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r pkg-load}
+library(tidyverse)
+library(janitor)
+```
+
+```{r data-load}
+train <- read_csv("./data/train.csv") %>% 
+  mutate(Pclass = factor(Pclass),
+         Fare = log1p(Fare),
+         Embarked = ifelse(is.na(Embarked), mode(Embarked), Embarked))
+test <- read_csv("./data/test.csv") %>% 
+  mutate(Pclass = factor(Pclass),
+         Fare = log1p(Fare),
+         Embarked = ifelse(is.na(Embarked), mode(Embarked), Embarked))
+```
+
+
+```{r}
+model <- glm(Survived ~ Sex + Pclass + Fare + Embarked, data = train, family = binomial)
+summary(model)
+
+probabilities <- predict(model, test, type = "response")
+
+predicted_classes <- ifelse(probabilities > 0.5, 1, 0)
+
+results <- test %>% 
+  bind_cols(predicted_classes) %>% 
+  select(PassengerId, Survived = ...12)
+
+write_csv(results, "./data/titanic_glm_20220719.csv")
+```
+
